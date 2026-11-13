@@ -1,0 +1,230 @@
+{
+  "$schema": "https://schema.management.azure.com/schemas/2019-04-01/deploymentTemplate.json#",
+  "contentVersion": "1.0.0.0",
+  "metadata": {
+    "description": "cor. Event Hub integration: Event Hubs namespace + event hub + SAS policy (Manage/Send/Listen) and a storage account + blob container for the consumer's checkpoints. No keys in the outputs: cor. retrieves them itself. Same resources as eventhub-steps-manual.pdf, steps 1-8."
+  },
+  "parameters": {
+    "location": {
+      "type": "string",
+      "defaultValue": "[resourceGroup().location]",
+      "metadata": {
+        "description": "Region for every resource (the PDF uses UAE North)."
+      }
+    },
+    "namespaceName": {
+      "type": "string",
+      "minLength": 6,
+      "maxLength": 50,
+      "metadata": {
+        "description": "Event Hubs namespace name, globally unique (<name>.servicebus.windows.net)."
+      }
+    },
+    "eventHubName": {
+      "type": "string",
+      "defaultValue": "coreventhub",
+      "minLength": 1,
+      "maxLength": 256
+    },
+    "pricingTier": {
+      "type": "string",
+      "defaultValue": "Basic",
+      "allowedValues": [
+        "Basic",
+        "Standard"
+      ]
+    },
+    "throughputUnits": {
+      "type": "int",
+      "defaultValue": 1,
+      "minValue": 1,
+      "maxValue": 40
+    },
+    "partitionCount": {
+      "type": "int",
+      "defaultValue": 2,
+      "minValue": 1,
+      "maxValue": 32
+    },
+    "retentionHours": {
+      "type": "int",
+      "defaultValue": 24,
+      "minValue": 1,
+      "maxValue": 168,
+      "metadata": {
+        "description": "Message retention in hours. Basic tier: at most 24."
+      }
+    },
+    "sharedAccessPolicyName": {
+      "type": "string",
+      "defaultValue": "corehSAS",
+      "metadata": {
+        "description": "Namespace SAS policy (Manage, Send, Listen): used by the consumer script and by the diagnostic settings."
+      }
+    },
+    "consumerGroup": {
+      "type": "string",
+      "defaultValue": "$Default",
+      "metadata": {
+        "description": "Consumer group the cor. collector reads with. Basic tier only has $Default; any other name is created (Standard only)."
+      }
+    },
+    "storageAccountName": {
+      "type": "string",
+      "minLength": 3,
+      "maxLength": 24,
+      "metadata": {
+        "description": "Storage account for the checkpoints: 3-24 lowercase letters and digits, globally unique."
+      }
+    },
+    "containerName": {
+      "type": "string",
+      "defaultValue": "corcontainer",
+      "minLength": 3,
+      "maxLength": 63
+    },
+    "storageKeyExpirationDays": {
+      "type": "int",
+      "defaultValue": 365,
+      "minValue": 0,
+      "maxValue": 3650,
+      "metadata": {
+        "description": "Storage account key expiration policy in days (0 = none). Azure flags keys older than this; they keep working until rotated."
+      }
+    },
+    "corConnectionId": {
+      "type": "string",
+      "defaultValue": "",
+      "metadata": {
+        "description": "Set by the cor. Hub so it can find this deployment afterwards. Leave as is."
+      }
+    }
+  },
+  "variables": {
+    "tags": "[if(empty(parameters('corConnectionId')), createObject('cor-integration', 'eventhub'), createObject('cor-integration', 'eventhub', 'cor-connection-id', parameters('corConnectionId')))]",
+    "ehApi": "2024-01-01",
+    "stApi": "2023-05-01",
+    "authRuleId": "[resourceId('Microsoft.EventHub/namespaces/authorizationRules', parameters('namespaceName'), parameters('sharedAccessPolicyName'))]",
+    "storageId": "[resourceId('Microsoft.Storage/storageAccounts', parameters('storageAccountName'))]",
+    "createConsumerGroup": "[not(equals(parameters('consumerGroup'), '$Default'))]"
+  },
+  "resources": [
+    {
+      "type": "Microsoft.EventHub/namespaces",
+      "apiVersion": "[variables('ehApi')]",
+      "name": "[parameters('namespaceName')]",
+      "location": "[parameters('location')]",
+      "tags": "[variables('tags')]",
+      "sku": {
+        "name": "[parameters('pricingTier')]",
+        "tier": "[parameters('pricingTier')]",
+        "capacity": "[parameters('throughputUnits')]"
+      },
+      "properties": {
+        "minimumTlsVersion": "1.2",
+        "publicNetworkAccess": "Enabled",
+        "disableLocalAuth": false
+      }
+    },
+    {
+      "type": "Microsoft.EventHub/namespaces/eventhubs",
+      "apiVersion": "[variables('ehApi')]",
+      "name": "[format('{0}/{1}', parameters('namespaceName'), parameters('eventHubName'))]",
+      "dependsOn": [
+        "[resourceId('Microsoft.EventHub/namespaces', parameters('namespaceName'))]"
+      ],
+      "properties": {
+        "partitionCount": "[parameters('partitionCount')]",
+        "retentionDescription": {
+          "cleanupPolicy": "Delete",
+          "retentionTimeInHours": "[if(equals(parameters('pricingTier'), 'Basic'), min(parameters('retentionHours'), 24), parameters('retentionHours'))]"
+        }
+      }
+    },
+    {
+      "condition": "[variables('createConsumerGroup')]",
+      "type": "Microsoft.EventHub/namespaces/eventhubs/consumergroups",
+      "apiVersion": "[variables('ehApi')]",
+      "name": "[format('{0}/{1}/{2}', parameters('namespaceName'), parameters('eventHubName'), parameters('consumerGroup'))]",
+      "dependsOn": [
+        "[resourceId('Microsoft.EventHub/namespaces/eventhubs', parameters('namespaceName'), parameters('eventHubName'))]"
+      ],
+      "properties": {}
+    },
+    {
+      "type": "Microsoft.EventHub/namespaces/authorizationRules",
+      "apiVersion": "[variables('ehApi')]",
+      "name": "[format('{0}/{1}', parameters('namespaceName'), parameters('sharedAccessPolicyName'))]",
+      "dependsOn": [
+        "[resourceId('Microsoft.EventHub/namespaces', parameters('namespaceName'))]"
+      ],
+      "properties": {
+        "rights": [
+          "Manage",
+          "Send",
+          "Listen"
+        ]
+      }
+    },
+    {
+      "type": "Microsoft.Storage/storageAccounts",
+      "apiVersion": "[variables('stApi')]",
+      "name": "[parameters('storageAccountName')]",
+      "location": "[parameters('location')]",
+      "tags": "[variables('tags')]",
+      "kind": "StorageV2",
+      "sku": {
+        "name": "Standard_LRS"
+      },
+      "properties": {
+        "accessTier": "Hot",
+        "minimumTlsVersion": "TLS1_2",
+        "supportsHttpsTrafficOnly": true,
+        "allowBlobPublicAccess": false,
+        "allowSharedKeyAccess": true,
+        "keyPolicy": "[if(greater(parameters('storageKeyExpirationDays'), 0), createObject('keyExpirationPeriodInDays', parameters('storageKeyExpirationDays')), null())]"
+      }
+    },
+    {
+      "type": "Microsoft.Storage/storageAccounts/blobServices/containers",
+      "apiVersion": "[variables('stApi')]",
+      "name": "[format('{0}/default/{1}', parameters('storageAccountName'), parameters('containerName'))]",
+      "dependsOn": [
+        "[variables('storageId')]"
+      ],
+      "properties": {
+        "publicAccess": "None"
+      }
+    }
+  ],
+  "outputs": {
+    "eventHubNamespace": {
+      "type": "string",
+      "value": "[parameters('namespaceName')]"
+    },
+    "eventHubName": {
+      "type": "string",
+      "value": "[parameters('eventHubName')]"
+    },
+    "consumerGroup": {
+      "type": "string",
+      "value": "[parameters('consumerGroup')]"
+    },
+    "sharedAccessKeyName": {
+      "type": "string",
+      "value": "[parameters('sharedAccessPolicyName')]"
+    },
+    "authorizationRuleId": {
+      "type": "string",
+      "value": "[variables('authRuleId')]"
+    },
+    "storageAccountName": {
+      "type": "string",
+      "value": "[parameters('storageAccountName')]"
+    },
+    "containerName": {
+      "type": "string",
+      "value": "[parameters('containerName')]"
+    }
+  }
+}

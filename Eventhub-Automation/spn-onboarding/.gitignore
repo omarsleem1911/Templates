@@ -1,0 +1,3 @@
+# Local state holds client secrets: never commit it.
+state/
+__pycache__/
